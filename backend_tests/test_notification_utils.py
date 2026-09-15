@@ -1,5 +1,6 @@
 from unittest.mock import AsyncMock, patch
 
+from django.db import IntegrityError, transaction
 from django.test import TestCase
 
 from apis.chatroom_dispatcher.chatroom_dispatcher_model import ChatroomDispatchConfig
@@ -13,7 +14,8 @@ from apis.notification.notification_utils import (
     create_chatroom_notifications_payload,
     create_new_message_notifications_payload,
 )
-from apis.settings.settings_model import NewMessageNotificationSettings
+from apis.role.role_model import Role
+from apis.settings.settings_model import ChatroomNotification, NewMessageNotificationSettings
 from apis.user.user_model import User
 
 
@@ -145,3 +147,155 @@ class NotificationBusinessLogicTest(TestCase):
         )
         title = "Agent mentioned you in a note on Customer"
         self.assert_recipients(payload, [self.owner], title, title)
+
+    def test_note_mention_notifies_only_mentioned_user(self):
+        # An active bystander must not receive the note alert just for sharing the company.
+        User.objects.create(company=self.company, name="Bystander", mobile_number="105", lang="en")
+        payload = create_chatroom_notifications_payload(
+            self.conversation, actor=self.agent, mentioned_user_ids=[self.owner.id],
+        )
+        title = "Agent mentioned you in a note on Customer"
+        self.assert_recipients(payload, [self.owner], title, title)
+
+    def configure_stage_notification(self):
+        # Role membership, company, and active status all matter for stage recipients.
+        role = Role.objects.create(name="QA stage recipients")
+        other_role = Role.objects.create(name="QA other stage recipients")
+        for user in (self.owner, self.inactive, self.outsider):
+            user.role = role
+            user.save(update_fields=["role"])
+        self.agent.role = other_role
+        self.agent.save(update_fields=["role"])
+        teammate = User.objects.create(
+            company=self.company, name="Teammate", mobile_number="105", lang="en", role=role,
+        )
+        previous_stage = ConversationStage.objects.create(name="Previous QA stage")
+        rule = ChatroomNotification.objects.create(
+            company=self.company, role=role, stage=self.stage,
+            message="Please review this conversation and follow up with the customer.",
+        )
+        # A rule for the old stage must not alert its role when entering the new stage.
+        ChatroomNotification.objects.create(
+            company=self.company, role=other_role, stage=previous_stage,
+            message="This message belongs to the previous stage.",
+        )
+        return rule, previous_stage, teammate
+
+    def test_stage_change_notifies_only_configured_role_with_settings_message(self):
+        rule, previous_stage, teammate = self.configure_stage_notification()
+        payload = create_chatroom_notifications_payload(
+            self.conversation, old_stage_id=previous_stage.id, new_stage_id=self.stage.id,
+        )
+        self.assert_recipients(
+            payload, [self.owner, teammate],
+            "Conversation Customer moved to Notification QA", rule.message,
+        )
+        # The configured body must also survive serialization and reach push delivery.
+        for notification in payload["notifications"]:
+            self.assertEqual(notification["message"], rule.message)
+        for push_call in self.push.call_args_list:
+            self.assertEqual(push_call.args[1], rule.message)
+
+    def test_stage_change_without_matching_settings_does_not_notify(self):
+        self.configure_stage_notification()
+        unconfigured_stage = ConversationStage.objects.create(name="Unconfigured QA stage")
+        old_stage_id = self.conversation.stage_id
+        self.conversation.stage = unconfigured_stage
+        self.assert_no_notification(create_chatroom_notifications_payload(
+            self.conversation, old_stage_id=old_stage_id, new_stage_id=unconfigured_stage.id,
+        ))
+
+    def test_unchanged_stage_does_not_notify_even_with_matching_settings(self):
+        self.configure_stage_notification()
+        self.assert_no_notification(create_chatroom_notifications_payload(
+            self.conversation, old_stage_id=self.stage.id, new_stage_id=self.stage.id,
+        ))
+
+    def test_same_stage_sends_each_role_its_own_settings_message(self):
+        rule, previous_stage, teammate = self.configure_stage_notification()
+        other_rule = ChatroomNotification.objects.create(
+            company=self.company, role=self.agent.role, stage=self.stage,
+            message="Agent team: arrange a follow-up call.",
+        )
+        payload = create_chatroom_notifications_payload(
+            self.conversation, old_stage_id=previous_stage.id, new_stage_id=self.stage.id,
+        )
+        expected = [
+            (self.owner.id, rule.message), (teammate.id, rule.message),
+            (self.agent.id, other_rule.message),
+        ]
+        records = Notification.objects.filter(conversation=self.conversation)
+        # Check recipient/message pairs so a message sent to the wrong role cannot pass.
+        self.assertCountEqual(records.values_list("user_id", "message"), expected)
+        self.assertCountEqual(payload["notification_event"]["target_user_ids"], [uid for uid, _ in expected])
+        self.assertCountEqual(
+            [(row["id"], row["message"]) for row in payload["notifications"]],
+            records.values_list("id", "message"),
+        )
+        self.assertCountEqual(
+            [(user.id, call.args[1]) for call in self.push.call_args_list for user in call.args[3]],
+            expected,
+        )
+
+    def test_other_company_stage_settings_do_not_trigger_notifications(self):
+        rule, previous_stage, _ = self.configure_stage_notification()
+        role = rule.role
+        rule.delete()
+        # Same stage and role, but only the other company has a matching rule.
+        ChatroomNotification.objects.create(
+            company=self.outsider.company, role=role, stage=self.stage,
+            message="Other company's notification.",
+        )
+        self.assert_no_notification(create_chatroom_notifications_payload(
+            self.conversation, old_stage_id=previous_stage.id, new_stage_id=self.stage.id,
+        ))
+
+    def test_stage_settings_message_resolves_conversation_placeholders(self):
+        rule, previous_stage, teammate = self.configure_stage_notification()
+        role = rule.role
+        # Replace the setting using the supported delete-and-add workflow.
+        rule.delete()
+        ChatroomNotification.objects.create(
+            company=self.company, role=role, stage=self.stage,
+            message=("@conversation_name (@conversation_number) moved to @stage_name via "
+                     "@connector_name; owner: @contact_owner; agent: @agent_name."),
+        )
+        payload = create_chatroom_notifications_payload(
+            self.conversation, old_stage_id=previous_stage.id, new_stage_id=self.stage.id,
+        )
+        expected_message = "Customer (20001) moved to Notification QA via QA; owner: Owner; agent: Agent."
+        self.assert_recipients(
+            payload, [self.owner, teammate],
+            "Conversation Customer moved to Notification QA", expected_message,
+        )
+        for row in payload["notifications"]:
+            self.assertEqual(row["message"], expected_message)
+        for call in self.push.call_args_list:
+            self.assertEqual(call.args[1], expected_message)
+
+    def test_mentions_do_not_also_notify_matching_stage_role(self):
+        _, previous_stage, _ = self.configure_stage_notification()
+        # Owner and teammate match the stage rule, but only the agent is mentioned.
+        payload = create_chatroom_notifications_payload(
+            self.conversation, old_stage_id=previous_stage.id, new_stage_id=self.stage.id,
+            actor=self.owner, mentioned_user_ids=[self.agent.id],
+        )
+        title = "Owner mentioned you in a note on Customer"
+        self.assert_recipients(payload, [self.agent], title, title)
+
+    def test_duplicate_company_role_stage_setting_is_rejected(self):
+        rule, _, _ = self.configure_stage_notification()
+        # The database enforces one setting per company, role, and stage.
+        # A savepoint lets us inspect the original row after the rejected insert.
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                ChatroomNotification.objects.create(
+                    company=self.company, role=rule.role, stage=self.stage,
+                    message="A different message must not bypass uniqueness.",
+                )
+        self.assertEqual(ChatroomNotification.objects.filter(
+            company=self.company, role=rule.role, stage=self.stage,
+        ).count(), 1)
+        original_message = rule.message
+        rule.refresh_from_db()
+        self.assertEqual(rule.message, original_message)
