@@ -1,0 +1,28 @@
+{
+  "name": "chatroom-automation",
+  "version": "1.0.0",
+  "description": "Playwright APIRequestContext automation test suite for Chatroom production deployment and API testing",
+  "main": "index.js",
+  "scripts": {
+    "test:smoke": "playwright test --config=playwright.config.ts",
+    "test:smoke:headed": "playwright test --config=playwright.config.ts --headed",
+    "test:report": "playwright show-report"
+  },
+  "keywords": [
+    "playwright",
+    "api-testing",
+    "jenkins",
+    "django",
+    "chatroom",
+    "chatroom-automation"
+  ],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@playwright/test": "^1.42.1",
+    "@types/node": "^20.11.24",
+    "dotenv": "^16.4.5",
+    "typescript": "^5.3.3",
+    "xlsx": "^0.18.5"
+  }
+}
