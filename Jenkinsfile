@@ -13,8 +13,8 @@ pipeline {
 
     environment {
         CI = 'true'
-        BASE_URL = 'https://connect-plus.app/en-US/login'
-        API_URL = 'https://api.connect-plus.app'
+        BASE_URL = 'https://dev.connect-plus.app/en-US/login'
+        API_URL = 'https://dev-api.connect-plus.app'
         TEST_USER_EMAIL = credentials('CHATROOM_DEPLOY_USER')
         TEST_USER_PASSWORD = credentials('CHATROOM_DEPLOY_PASSWORD')
         INTEGRATION_API_TOKEN = credentials('CHATROOM_INTEGRATION_TOKEN')
