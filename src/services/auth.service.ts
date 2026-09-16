@@ -38,7 +38,7 @@ export class AuthService {
         timeout: 5000,
       }).catch(async () => {
         // Fallback to web login route if api URL fails
-        return await request.post(`${ENV.BASE_URL}/ar/login/`, {
+        return await request.post(`${ENV.BASE_URL}`, {
           data: loginPayload,
           timeout: 5000,
         });
@@ -73,7 +73,7 @@ export class AuthService {
         },
         timeout: 5000,
       }).catch(async () => {
-        return await request.post(`${ENV.BASE_URL}/ar/login/`, {
+        return await request.post(`${ENV.BASE_URL}`, {
           data: payload,
           timeout: 5000,
         });

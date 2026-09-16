@@ -24,7 +24,7 @@ export default defineConfig({
   timeout: 30 * 1000,
   /* Shared settings for all projects */
   use: {
-    baseURL: process.env.BASE_URL || 'https://chatroom.app',
+    baseURL: process.env.BASE_URL || 'https://connect-plus.app/en-US/login',
     extraHTTPHeaders: {
       'Accept': 'application/json',
       'Content-Type': 'application/json',
